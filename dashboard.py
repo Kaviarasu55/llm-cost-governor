@@ -19,7 +19,7 @@ logger.init_db()
 
 st.set_page_config(page_title="LLM Cost Governor", layout="wide")
 
-st.title("🧭 Intelligent LLM Cost Governor")
+st.title("Intelligent LLM Cost Governor")
 st.caption(
     "Routes queries to the cheapest capable model tier, escalating only "
     "when a transparent quality gate fails. Every decision is logged and inspectable."
