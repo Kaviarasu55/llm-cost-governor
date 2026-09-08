@@ -19,10 +19,20 @@ import config
 # CONVERSATIONAL BYPASS
 # ----------------------------------------------------------------------------
 CONVERSATIONAL_PATTERNS = [
-    r"^\s*(hi|hello|hey|yo|sup)\s*,?\s*(there|everyone|all|friend|buddy|mate|folks|guys|team)?\s*[!.,]*\s*$",
+    r"^\s*(hi|hello|hey|yo|sup|hiya)\s*,?\s*(there|everyone|all|friend|buddy|mate|folks|guys|team)?\s*[!.,]*\s*$",
     r"^\s*(thanks|thank you|thx|ty|cheers)\s*,?\s*(a lot|so much|very much|a bunch|a ton)?\s*[!.,]*\s*$",
     r"^\s*(bye|goodbye|see ya|later|see you)\s*,?\s*(later|soon|tomorrow|for now)?\s*[!.,]*\s*$",
-    r"^\s*(how are you|what's up|whats up)\s*[?!.,]*\s*$",
+    # BUG FOUND WHILE TESTING v3 LIVE (2026-09-06): this standalone list was
+    # missing common phrasings like "how's it going" entirely, and — more
+    # importantly — nothing in this file matched a GREETING plus a wellbeing
+    # question together (e.g. "hey, how's it going?"). A real live query
+    # phrased exactly that way skipped the bypass entirely and got routed
+    # through the full classifier/gate pipeline (landed on INSTRUCTION_HOWTO,
+    # of all things), burning cost on what should've been a free bypass.
+    # Fixed by (a) expanding the phrasing list and (b) adding a second
+    # pattern below for the combined greeting+question form.
+    r"^\s*(how are you( doing)?|how's it going|hows it going|how goes it|how's everything|hows everything|how's things|hows things|how've you been|hows you been|how have you been|what's up|whats up|what's new|whats new)\s*[?!.,]*\s*$",
+    r"^\s*(hi|hello|hey|yo|sup|hiya)\s*[,!.]*\s*(how are you( doing)?|how's it going|hows it going|how goes it|how's everything|hows everything|how's things|hows things|how've you been|hows you been|how have you been|what's up|whats up|what's new|whats new)\s*[?!.,]*\s*$",
     r"^\s*(good morning|good evening|good night|good afternoon)\s*,?\s*(everyone|all|there|folks|team)?\s*[!.,]*\s*$",
     r"^\s*(ok|okay|cool|nice|great|awesome)\s*[!.,]*\s*$",
 ]
@@ -189,9 +199,35 @@ def classify_query(query: str):
     return "EXPLANATION", multi_part
 
 
+def build_result(query_type: str, multi_part: bool) -> dict:
+    """
+    Shared finalization step: given a (query_type, multi_part) pair from
+    ANY classifier backend (rule-based or ML), compute the risk level
+    and MULTI_PART bump and return the standard classification dict.
+
+    Factored out so classify() (rule-based) and ml_classifier.classify()
+    (ML-based) apply the exact same risk-level logic and never drift
+    apart — only the type-detection step differs between backends.
+    """
+    risk_level = config.RISK_LEVEL_BY_TYPE[query_type]
+
+    # MULTI_PART override bumps risk one level
+    if multi_part:
+        idx = config.RISK_ESCALATION_ORDER.index(risk_level)
+        if idx < len(config.RISK_ESCALATION_ORDER) - 1:
+            risk_level = config.RISK_ESCALATION_ORDER[idx + 1]
+
+    return {
+        "is_conversational": False,
+        "query_type": query_type,
+        "is_multi_part": multi_part,
+        "risk_level": risk_level,
+    }
+
+
 def classify(query: str):
     """
-    Full pre-classifier + classifier entry point.
+    Full pre-classifier + classifier entry point (RULE-BASED backend).
 
     Returns:
         dict with keys: is_conversational, query_type, is_multi_part, risk_level
@@ -208,17 +244,4 @@ def classify(query: str):
         }
 
     query_type, multi_part = classify_query(query)
-    risk_level = config.RISK_LEVEL_BY_TYPE[query_type]
-
-    # MULTI_PART override bumps risk one level
-    if multi_part:
-        idx = config.RISK_ESCALATION_ORDER.index(risk_level)
-        if idx < len(config.RISK_ESCALATION_ORDER) - 1:
-            risk_level = config.RISK_ESCALATION_ORDER[idx + 1]
-
-    return {
-        "is_conversational": False,
-        "query_type": query_type,
-        "is_multi_part": multi_part,
-        "risk_level": risk_level,
-    }
+    return build_result(query_type, multi_part)

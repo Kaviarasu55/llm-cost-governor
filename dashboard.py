@@ -2,10 +2,14 @@
 dashboard.py — Intelligent LLM Cost Governor
 Streamlit UI: a query box to run queries through the pipeline, plus
 an aggregate stats dashboard (volume, tier distribution, escalation
-rate, cost-saved-vs-baseline, per-type gate pass/fail).
+rate, cost-saved-vs-baseline, per-type gate status, latency-by-tier)
+and a filterable log explorer with per-row signal-level drill-down —
+built for the v3 calibration pass (spot-checking REVIEW/FAIL rows).
 
 Run with: streamlit run dashboard.py
 """
+
+import json
 
 import streamlit as st
 import pandas as pd
@@ -52,7 +56,20 @@ if st.button("Run", type="primary"):
             col1.metric("Query type", result["query_type"])
             col2.metric("Final tier", result["final_tier"])
             col3.metric("Escalated?", "Yes" if result["escalated"] else "No")
-            col4.metric("Gate passed?", "Yes" if result["gate_pass"] else "No")
+            col4.metric(
+                "Gate status",
+                result["gate_status"] or ("Pass" if result["gate_pass"] else "Fail"),
+                help="PASS/REVIEW/FAIL come from the v3 weighted risk gate. "
+                     "REVIEW means the response was accepted (no escalation) "
+                     "but flagged as borderline for manual spot-checking later. "
+                     "BYPASSED = conversational query, never gated. "
+                     "ERROR = API failure, gate never ran."
+            )
+
+            if result["risk_score"] is not None:
+                st.caption(f"Risk score: {result['risk_score']}")
+            if result.get("gate_reason"):
+                st.caption(f"Gate reason: {result['gate_reason']}")
 
             col5, col6, col7 = st.columns(3)
             col5.metric("Cost", f"${result['cost']:.6f}")
@@ -87,6 +104,14 @@ else:
         help="Baseline = cost if every query had gone straight to the Specialized tier."
     )
 
+    st.metric(
+        "Flagged for review",
+        f"{stats['review_count']} ({stats['review_rate'] * 100:.1f}%)",
+        help="Responses that were accepted (not escalated) but scored in the "
+             "20-49 risk-score band — borderline cases worth a manual spot-check "
+             "when calibrating the gate's weights."
+    )
+
     st.divider()
 
     left, right = st.columns(2)
@@ -101,24 +126,110 @@ else:
             st.bar_chart(tier_df)
 
     with right:
-        st.subheader("Per-type gate pass/fail")
-        if stats["per_type_pass_fail"]:
+        st.subheader("Per-type gate status (PASS / REVIEW / FAIL)")
+        if stats["per_type_status"]:
             rows = []
-            for qtype, counts in stats["per_type_pass_fail"].items():
-                rows.append({"Type": qtype, "Pass": counts["pass"], "Fail": counts["fail"]})
-            pass_fail_df = pd.DataFrame(rows).set_index("Type")
-            st.bar_chart(pass_fail_df)
+            for qtype, counts in stats["per_type_status"].items():
+                rows.append({
+                    "Type": qtype,
+                    "Pass": counts.get("PASS", 0),
+                    "Review": counts.get("REVIEW", 0),
+                    "Fail": counts.get("FAIL", 0),
+                })
+            status_df = pd.DataFrame(rows).set_index("Type")
+            st.bar_chart(status_df)
+
+    st.subheader("Average latency by tier")
+    if stats["avg_latency_by_tier"]:
+        latency_df = pd.DataFrame(
+            list(stats["avg_latency_by_tier"].items()),
+            columns=["Tier", "Avg latency (s)"]
+        ).set_index("Tier")
+        st.bar_chart(latency_df)
 
     st.divider()
-    st.subheader("Recent queries")
+
+    # ------------------------------------------------------------------------
+    # LOG EXPLORER — filterable table + per-row drill-down. Built for the
+    # calibration pass (v3 plan's "15-20 manually-judged real logged
+    # responses"): rather than scrolling a flat dataframe, filter down to
+    # e.g. "COMPARISON x REVIEW" and inspect exactly which signals fired.
+    # ------------------------------------------------------------------------
+    st.subheader("Log explorer")
     logs = logger.get_all_logs()
-    if logs:
-        display_df = pd.DataFrame(logs)[
-            ["timestamp", "query_type", "initial_tier", "final_tier",
-             "escalated", "gate_pass", "cost_incurred", "latency_seconds"]
-        ].head(20)
+
+    if not logs:
+        st.info("No queries logged yet.")
+    else:
+        all_types = sorted({l["query_type"] for l in logs})
+        all_statuses = ["PASS", "REVIEW", "FAIL", "BYPASSED", "ERROR"]
+
+        filter_col1, filter_col2, filter_col3 = st.columns([2, 2, 1])
+        with filter_col1:
+            type_filter = st.multiselect("Query type", options=all_types, default=[])
+        with filter_col2:
+            status_filter = st.multiselect(
+                "Gate status", options=all_statuses, default=["REVIEW", "FAIL"],
+                help="Defaults to REVIEW + FAIL — the rows worth a manual look "
+                     "when calibrating gate weights. Clear to see everything."
+            )
+        with filter_col3:
+            row_limit = st.number_input("Max rows", min_value=5, max_value=500, value=50, step=5)
+
+        full_df = pd.DataFrame(logs)
+        # Normalize missing gate_status on legacy rows the same way
+        # get_summary_stats() does, so filtering behaves consistently.
+        full_df["gate_status"] = full_df.apply(
+            lambda row: row["gate_status"] or ("PASS" if row["gate_pass"] else "FAIL"),
+            axis=1,
+        )
+
+        filtered_df = full_df
+        if type_filter:
+            filtered_df = filtered_df[filtered_df["query_type"].isin(type_filter)]
+        if status_filter:
+            filtered_df = filtered_df[filtered_df["gate_status"].isin(status_filter)]
+
+        st.caption(f"{len(filtered_df)} of {len(full_df)} logged queries match the current filter.")
+
+        display_df = filtered_df[
+            ["id", "timestamp", "query_type", "initial_tier", "final_tier",
+             "escalated", "gate_status", "risk_score", "gate_reason",
+             "cost_incurred", "latency_seconds"]
+        ].head(int(row_limit)).copy()
         display_df["timestamp"] = pd.to_datetime(display_df["timestamp"], unit="s")
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        # --- Per-row drill-down: signal-level breakdown for one query ---
+        if not filtered_df.empty:
+            st.markdown("**Inspect a single query**")
+            options = filtered_df["id"].head(int(row_limit)).tolist()
+
+            def _label(row_id):
+                row = filtered_df[filtered_df["id"] == row_id].iloc[0]
+                return f"#{row_id} — {row['query_type']} — {row['gate_status']} (score={row['risk_score']})"
+
+            selected_id = st.selectbox("Select a logged query by ID", options=options, format_func=_label)
+
+            if selected_id is not None:
+                row = filtered_df[filtered_df["id"] == selected_id].iloc[0]
+                st.write(f"**Reason:** {row['gate_reason'] or '(none recorded)'}")
+
+                signals_raw = row.get("gate_signals")
+                if signals_raw:
+                    try:
+                        signals = json.loads(signals_raw)
+                    except (TypeError, json.JSONDecodeError):
+                        signals = []
+                    if signals:
+                        st.table(pd.DataFrame(signals)[["name", "points", "reason"]])
+                    else:
+                        st.caption("No individual risk signals were triggered.")
+                else:
+                    st.caption("No signal breakdown recorded for this row.")
+
+                if row.get("raw_query_text"):
+                    st.text_area("Original query", row["raw_query_text"], height=80, disabled=True)
 
 # ----------------------------------------------------------------------------
 # LIMITATIONS NOTE

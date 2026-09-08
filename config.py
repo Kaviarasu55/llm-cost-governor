@@ -62,6 +62,18 @@ DATA_DIR = "data"
 DB_PATH = os.path.join(DATA_DIR, "logs.db")
 
 # ----------------------------------------------------------------------------
+# CLASSIFIER BACKEND
+# "ml"   -> TF-IDF + LinearSVC (ml_classifier.py). 78% type accuracy /
+#           92% tier accuracy on held-out natural-phrasing test set.
+#           This is the production default as of Phase 2 completion.
+# "rule" -> regex/keyword heuristics (classifier.py). Free, deterministic,
+#           fully transparent, but only 32% type accuracy on the same
+#           holdout — kept available for comparison/fallback/demo purposes,
+#           not for production routing.
+# ----------------------------------------------------------------------------
+CLASSIFIER_BACKEND = "ml"
+
+# ----------------------------------------------------------------------------
 # QUERY TYPES (8 types + MULTI_PART override tag)
 # Single-label classification — a query gets exactly one base type,
 # optionally flagged with the MULTI_PART override.

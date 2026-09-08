@@ -5,11 +5,27 @@ escalation-on-fail -> logger. This is the first true end-to-end run
 of the whole system.
 """
 
+import json
+
 import classifier
+import ml_classifier
 import router
 import model_client
 import quality_gate
 import logger
+import config
+
+
+def _classify(query_text: str) -> dict:
+    """
+    Dispatch to whichever classifier backend is active in config.py.
+    Both classifier.classify() and ml_classifier.classify() return the
+    identical dict shape, so this is the only place backend choice
+    matters — nothing downstream needs to know or care which one ran.
+    """
+    if config.CLASSIFIER_BACKEND == "ml":
+        return ml_classifier.classify(query_text)
+    return classifier.classify(query_text)
 
 
 def run_query(query_text: str) -> dict:
@@ -27,13 +43,15 @@ def run_query(query_text: str) -> dict:
             "final_tier": str,
             "escalated": bool,
             "gate_pass": bool,
+            "gate_status": "PASS" | "REVIEW" | "FAIL" | "BYPASSED" | "ERROR",
+            "risk_score": int or None,
             "cost": float,
             "baseline_cost": float,
             "latency_seconds": float,
             "error": str or None,
         }
     """
-    classification = classifier.classify(query_text)
+    classification = _classify(query_text)
 
     # --- Conversational bypass: cheapest tier, no gate at all ---
     if classification["is_conversational"]:
@@ -45,7 +63,8 @@ def run_query(query_text: str) -> dict:
                 response_text="Sorry, something went wrong processing that.",
                 query_type="CONVERSATIONAL", is_multi_part=False, risk_level=None,
                 initial_tier="economy", final_tier="economy", escalated=False,
-                gate_pass=False, cost=0.0, baseline_cost=0.0,
+                gate_pass=False, gate_status="ERROR", risk_score=None,
+                cost=0.0, baseline_cost=0.0,
                 latency_seconds=result["latency_seconds"], error=result["error"],
             )
 
@@ -55,7 +74,9 @@ def run_query(query_text: str) -> dict:
         logger.log_query(
             query_type="CONVERSATIONAL", is_multi_part=False, risk_level="none",
             initial_tier="economy", final_tier="economy", escalated=False,
-            gate_pass=True, input_tokens=result["input_tokens"],
+            gate_pass=True, gate_status="BYPASSED", risk_score=None,
+            gate_reason="Conversational bypass — never gated", gate_signals="[]",
+            input_tokens=result["input_tokens"],
             output_tokens=result["output_tokens"], cost_incurred=result["cost"],
             baseline_cost=baseline_cost, latency_seconds=result["latency_seconds"],
             raw_query_text=query_text,
@@ -64,6 +85,8 @@ def run_query(query_text: str) -> dict:
             response_text=result["response_text"], query_type="CONVERSATIONAL",
             is_multi_part=False, risk_level=None, initial_tier="economy",
             final_tier="economy", escalated=False, gate_pass=True,
+            gate_status="BYPASSED", risk_score=None,
+            gate_reason="Conversational bypass — never gated",
             cost=result["cost"], baseline_cost=baseline_cost,
             latency_seconds=result["latency_seconds"], error=None,
         )
@@ -100,7 +123,8 @@ def run_query(query_text: str) -> dict:
                     response_text="Sorry, something went wrong processing that.",
                     query_type=query_type, is_multi_part=is_multi_part, risk_level=risk_level,
                     initial_tier=initial_tier, final_tier=current_tier, escalated=escalated,
-                    gate_pass=False, cost=total_cost, baseline_cost=0.0,
+                    gate_pass=False, gate_status="ERROR", risk_score=None,
+                    cost=total_cost, baseline_cost=0.0,
                     latency_seconds=total_latency, error=call_result["error"],
                 )
             escalated = True
@@ -136,6 +160,8 @@ def run_query(query_text: str) -> dict:
         query_type=query_type, is_multi_part=is_multi_part, risk_level=risk_level,
         initial_tier=initial_tier, final_tier=current_tier, escalated=escalated,
         escalation_reason=escalation_reason, gate_pass=gate_result["passed"],
+        gate_status=gate_result["status"], risk_score=gate_result["risk_score"],
+        gate_reason=gate_result["reason"], gate_signals=json.dumps(gate_result["signals"]),
         input_tokens=last_result["input_tokens"], output_tokens=last_result["output_tokens"],
         cost_incurred=total_cost, baseline_cost=baseline_cost,
         latency_seconds=total_latency, raw_query_text=query_text,
@@ -145,6 +171,8 @@ def run_query(query_text: str) -> dict:
         response_text=last_result["response_text"], query_type=query_type,
         is_multi_part=is_multi_part, risk_level=risk_level, initial_tier=initial_tier,
         final_tier=current_tier, escalated=escalated, gate_pass=gate_result["passed"],
+        gate_status=gate_result["status"], risk_score=gate_result["risk_score"],
+        gate_reason=gate_result["reason"],
         cost=total_cost, baseline_cost=baseline_cost, latency_seconds=total_latency,
         error=None,
     )
@@ -156,6 +184,8 @@ def _log_failure(query_type, is_multi_part, risk_level, initial_tier, final_tier
         query_type=query_type, is_multi_part=is_multi_part, risk_level=risk_level or "none",
         initial_tier=initial_tier, final_tier=final_tier, escalated=escalated,
         escalation_reason=escalation_reason, gate_pass=False,
+        gate_status="ERROR", risk_score=None,
+        gate_reason=escalation_reason, gate_signals="[]",
         input_tokens=None, output_tokens=None, cost_incurred=cost,
         baseline_cost=0.0, latency_seconds=latency, raw_query_text=query_text,
     )
@@ -166,6 +196,8 @@ def _log_and_return_error(query_text, query_type, escalated, risk_level, result)
         query_type=query_type, is_multi_part=False, risk_level=risk_level or "none",
         initial_tier="economy", final_tier="economy", escalated=escalated,
         escalation_reason=result["error"], gate_pass=False,
+        gate_status="ERROR", risk_score=None,
+        gate_reason=result["error"], gate_signals="[]",
         input_tokens=None, output_tokens=None, cost_incurred=0.0,
         baseline_cost=0.0, latency_seconds=result["latency_seconds"],
         raw_query_text=query_text,
@@ -174,7 +206,7 @@ def _log_and_return_error(query_text, query_type, escalated, risk_level, result)
 
 def _build_output(response_text, query_type, is_multi_part, risk_level, initial_tier,
                    final_tier, escalated, gate_pass, cost, baseline_cost,
-                   latency_seconds, error):
+                   latency_seconds, error, gate_status=None, risk_score=None, gate_reason=None):
     return {
         "response_text": response_text,
         "query_type": query_type,
@@ -184,6 +216,9 @@ def _build_output(response_text, query_type, is_multi_part, risk_level, initial_
         "final_tier": final_tier,
         "escalated": escalated,
         "gate_pass": gate_pass,
+        "gate_status": gate_status,
+        "risk_score": risk_score,
+        "gate_reason": gate_reason,
         "cost": cost,
         "baseline_cost": baseline_cost,
         "latency_seconds": latency_seconds,
