@@ -236,11 +236,17 @@ else:
 # ----------------------------------------------------------------------------
 st.divider()
 with st.expander("Documented limitations"):
-    st.markdown("""
+    backend_label = (
+        "ML-based (TF-IDF + LinearSVC, 78% type / 92% tier accuracy on a held-out natural-phrasing set)"
+        if config.CLASSIFIER_BACKEND == "ml"
+        else "rule-based (keyword/pattern matching)"
+    )
+    st.markdown(f"""
     - The quality gate measures a **heuristic failure-risk signal**, not ground-truth
       correctness. A structurally complete but factually wrong answer can still pass.
-    - Query classification is **rule-based** (keyword/pattern matching), not ML-trained —
-      it can misclassify edge cases that don't match expected phrasing.
+    - Query classification is currently **{backend_label}** — it can still misclassify
+      edge cases that don't resemble its training distribution. (A separate rule-based
+      classifier also exists in this project as a fallback/baseline — see `classifier.py`.)
     - CREATIVE queries have no depth check beyond Layer 1 — there's no way to verify
       creative quality heuristically.
     - COMPARISON, SUMMARY, and MULTI_PART checks rely on best-effort text extraction
