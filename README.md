@@ -1,5 +1,7 @@
 # Intelligent LLM Cost Governor
 
+🔗 **Live Demo:** [https://llm-cost-governor.streamlit.app/](https://llm-cost-governor.streamlit.app/)
+
 Routes each incoming query to the **cheapest model tier capable of answering it well**, escalating to a stronger (pricier) tier only when a transparent, inspectable quality gate says the response isn't good enough. Every routing decision, gate score, and escalation is logged and explainable — nothing is a black box.
 
 Built on [Groq](https://groq.com/) with three model tiers:
