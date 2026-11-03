@@ -1,7 +1,7 @@
 """
 ml_classifier.py — Intelligent LLM Cost Governor, Phase 2
 
-ML-based query type classification (TF-IDF + Logistic Regression),
+ML-based query type classification (TF-IDF + LinearSVC),
 running alongside the rule-based classifier.py — not replacing it.
 Matches classifier.py's classify_query() interface so either one can
 feed the router behind a common contract.

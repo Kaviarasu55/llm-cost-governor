@@ -1,7 +1,7 @@
 """
 train_classifier.py — Intelligent LLM Cost Governor, Phase 2
 
-Trains a TF-IDF + Logistic Regression classifier on the labeled query
+Trains a TF-IDF + LinearSVC classifier on the labeled query
 dataset (llm_query_classifier_dataset.csv), evaluates it with 5-fold
 cross-validation (the dataset is small — 208 rows / 8 classes — so a
 single train/test split would leave too few examples per class to be
